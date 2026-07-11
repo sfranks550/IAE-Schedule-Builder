@@ -64,33 +64,49 @@ with st.sidebar:
         st.rerun()
 
 st.subheader(f"1. Add Equipment — {discipline}")
+st.caption(
+    "Upload one or more cut sheet PDFs at once. Each file's name is used as the "
+    "equipment tag hint (a file named CC-1.pdf is tagged CC-1) — you can always "
+    "fix tags afterward in the editable table below."
+)
 
 with st.form("add_equipment_form", clear_on_submit=True):
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        tag_input = st.text_input("Equipment Tag (e.g. AHU-1, RTU-3)", value="")
-    with col2:
-        cut_sheet = st.file_uploader("Cut Sheet (PDF)", type=["pdf"], key="uploader")
+    cut_sheets = st.file_uploader(
+        "Cut Sheets (PDF) — select multiple files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="uploader",
+    )
     submitted = st.form_submit_button("Extract & Add to Schedule", type="primary")
 
 if submitted:
-    if not cut_sheet:
-        st.warning("Upload a cut sheet PDF before extracting.")
+    if not cut_sheets:
+        st.warning("Upload at least one cut sheet PDF before extracting.")
     else:
-        with st.spinner(f"Reading cut sheet and extracting specs for {tag_input or 'this unit'}..."):
+        progress = st.progress(0.0, text="Starting...")
+        added = []
+        failed = []
+        total = len(cut_sheets)
+        for i, cut_sheet in enumerate(cut_sheets):
+            tag_hint = cut_sheet.name.rsplit(".", 1)[0].strip()
+            progress.progress(i / total, text="Reading " + cut_sheet.name + "...")
             try:
                 text = extract_text_from_pdf(cut_sheet.read())
                 if not text.strip():
-                    st.error(
-                        "Couldn't extract any text from this PDF — it may be a scanned image. "
-                        "Try an OCR'd version, or enter the specs manually below."
-                    )
-                else:
-                    data = extract_equipment_data(text, columns, api_key, tag_hint=tag_input)
-                    st.session_state.rows.append(data)
-                    st.success(f"Added {data.get('tag', tag_input or 'equipment')} to the schedule.")
+                    failed.append(cut_sheet.name + " - no extractable text (likely a scanned image)")
+                    continue
+                data = extract_equipment_data(text, columns, api_key, tag_hint=tag_hint)
+                st.session_state.rows.append(data)
+                added.append(data.get("tag", tag_hint))
             except Exception as e:
-                st.error(f"Extraction failed: {e}")
+                failed.append(cut_sheet.name + " - " + str(e))
+        progress.progress(1.0, text="Done.")
+        progress.empty()
+
+        if added:
+            st.success("Added " + str(len(added)) + " unit(s) to the schedule: " + ", ".join(added))
+        if failed:
+            st.error("Some files could not be processed:\n\n" + "\n".join("- " + f for f in failed))
 
 st.subheader("2. Review & Edit Schedule")
 
@@ -112,23 +128,10 @@ if st.session_state.rows:
     )
 
     st.subheader("3. Export")
-    schedule_title = f"{discipline.split(' (')[0]} Equipment Schedule"
+    discipline_short = discipline.split(" (")[0]
+    schedule_title = discipline_short + " Equipment Schedule"
     if project_name:
-        schedule_title = f"{project_name} — {schedule_title}"
+        schedule_title = project_name + " — " + schedule_title
 
     export_rows = edited_df.rename(columns={v: k for k, v in col_labels.items()}).to_dict("records")
-    xlsx_bytes = build_schedule_workbook(export_rows, columns, title=schedule_title)
-
-    st.download_button(
-        "Download Branded Excel Schedule",
-        data=xlsx_bytes,
-        file_name=f"{(project_no or 'IAE')}_{discipline.split(' ')[0]}_Equipment_Schedule.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
-    st.caption(
-        "Open in Excel, then use AutoCAD's Insert → OLE Object (or Data Link → Table) "
-        "to place it on your drawing sheet."
-    )
-else:
-    st.info("No equipment added yet. Upload a cut sheet above to get started.")
+    xlsx_bytes = build_schedule_work
