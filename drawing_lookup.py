@@ -35,6 +35,23 @@ def render_pdf_pages(file_bytes: bytes, dpi: int = RENDER_DPI):
     return pages
 
 
+def render_pdf_pages_multi(files, dpi: int = RENDER_DPI):
+    """
+    Render pages across multiple uploaded PDF files (e.g. a drawing set split
+    into several files/volumes). files: list of (filename, file_bytes).
+
+    Returns a list of (page_label, png_bytes), where page_label identifies both
+    the source file and page number (e.g. "M-Series Sheets.pdf, p. 3") so lookup
+    results can be traced back to a specific sheet if needed.
+    """
+    all_pages = []
+    for filename, file_bytes in files:
+        for page_num, png_bytes in render_pdf_pages(file_bytes, dpi=dpi):
+            label = f"{filename}, p. {page_num}"
+            all_pages.append((label, png_bytes))
+    return all_pages
+
+
 def _build_lookup_tool(remaining_tags):
     return {
         "name": "report_tag_locations",
@@ -104,8 +121,8 @@ def find_tag_locations(pages, tags, api_key, progress_callback=None):
                 ),
             }
         ]
-        for page_num, png_bytes in batch:
-            content.append({"type": "text", "text": f"--- Sheet (page {page_num}) ---"})
+        for page_label, png_bytes in batch:
+            content.append({"type": "text", "text": f"--- Sheet: {page_label} ---"})
             content.append(
                 {
                     "type": "image",

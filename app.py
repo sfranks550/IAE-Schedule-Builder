@@ -14,7 +14,7 @@ import pandas as pd
 from schema import DISCIPLINES
 from extraction import extract_text_from_pdf, extract_equipment_data
 from excel_export import build_schedule_workbook
-from drawing_lookup import render_pdf_pages, find_tag_locations
+from drawing_lookup import render_pdf_pages_multi, find_tag_locations
 
 st.set_page_config(page_title="IAE Equipment Schedule Builder", layout="wide")
 
@@ -64,20 +64,33 @@ with st.sidebar:
         st.session_state.rows = []
         st.rerun()
 
+has_location_col = any(c["key"] == "location_served" for c in columns)
+
 st.subheader(f"1. Add Equipment — {discipline}")
 st.caption(
-    "Upload one or more cut sheet PDFs at once. Each file's name is used as the "
-    "equipment tag hint (a file named CC-1.pdf is tagged CC-1) — you can always "
-    "fix tags afterward in the editable table below."
+    "Upload cut sheets and (optionally) your floor plan drawing set — both accept "
+    "multiple files at once. Each cut sheet's file name is used as the equipment tag "
+    "hint (a file named CC-1.pdf is tagged CC-1). If you include drawing set sheets, "
+    "Location / Area Served is auto-filled from wherever each tag's callout is found "
+    "on the plans — you can always fix tags or locations afterward in the editable "
+    "table below."
 )
 
 with st.form("add_equipment_form", clear_on_submit=True):
     cut_sheets = st.file_uploader(
-        "Cut Sheets (PDF) — select multiple files",
+        "Cut Sheets (PDF) — drag in multiple files",
         type=["pdf"],
         accept_multiple_files=True,
         key="uploader",
     )
+    drawing_files = None
+    if has_location_col:
+        drawing_files = st.file_uploader(
+            "Drawing Set (PDF) — optional, drag in multiple sheets/volumes",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="drawing_set_uploader",
+        )
     submitted = st.form_submit_button("Extract & Add to Schedule", type="primary")
 
 if submitted:
@@ -109,58 +122,48 @@ if submitted:
         if failed:
             st.error("Some files could not be processed:\n\n" + "\n".join("- " + f for f in failed))
 
-has_location_col = any(c["key"] == "location_served" for c in columns)
+        # --- Same step: if drawing sheets were included, auto-fill locations now ---
+        if has_location_col and drawing_files:
+            blank_tag_rows = [
+                r for r in st.session_state.rows
+                if r.get("tag") and not r.get("location_served")
+            ]
+            if blank_tag_rows:
+                tags_to_find = [r["tag"] for r in blank_tag_rows]
+                with st.spinner("Rendering drawing sheets..."):
+                    files_for_render = [(f.name, f.read()) for f in drawing_files]
+                    pages = render_pdf_pages_multi(files_for_render)
 
-if has_location_col and st.session_state.rows:
-    st.subheader("2. Auto-Fill Locations from Drawing Set (optional)")
-    st.caption(
-        "Upload the full floor plan drawing set (one PDF, all sheets). Claude will scan "
-        "every sheet for each equipment tag currently in your schedule and fill in the "
-        "room/area name it finds printed next to that tag's callout. This only fills in "
-        "blank Location fields — anything you've already typed or edited is left alone. "
-        "Treat results as a starting point and double-check against the plans."
-    )
-    drawing_set = st.file_uploader("Drawing Set (PDF)", type=["pdf"], key="drawing_set_uploader")
+                loc_progress = st.progress(0.0, text="Searching drawing set...")
 
-    if st.button("Find Locations for All Tags", disabled=not drawing_set):
-        blank_tag_rows = [
-            r for r in st.session_state.rows
-            if r.get("tag") and not r.get("location_served")
-        ]
-        if not blank_tag_rows:
-            st.info("Every row already has a location filled in — nothing to look up.")
-        else:
-            tags_to_find = [r["tag"] for r in blank_tag_rows]
-            with st.spinner("Rendering drawing sheets..."):
-                pages = render_pdf_pages(drawing_set.read())
+                def _on_progress(batch_i, total_batches, found_count):
+                    pct = batch_i / total_batches if total_batches else 1.0
+                    loc_progress.progress(
+                        pct,
+                        text=f"Searched {batch_i}/{total_batches} sheet batches — {found_count} tag(s) located so far...",
+                    )
 
-            progress = st.progress(0.0, text="Searching sheets...")
+                try:
+                    found = find_tag_locations(pages, tags_to_find, api_key, progress_callback=_on_progress)
+                except Exception as e:
+                    found = {}
+                    st.error(f"Drawing lookup failed: {e}")
+                loc_progress.empty()
 
-            def _on_progress(batch_i, total_batches, found_count):
-                pct = batch_i / total_batches if total_batches else 1.0
-                progress.progress(
-                    pct,
-                    text=f"Searched {batch_i}/{total_batches} sheet batches — {found_count} tag(s) located so far...",
-                )
+                if found:
+                    for r in st.session_state.rows:
+                        if r.get("tag") in found and not r.get("location_served"):
+                            r["location_served"] = found[r["tag"]]
+                    st.success(
+                        f"Filled in {len(found)} location(s): "
+                        + ", ".join(f"{t} → {loc}" for t, loc in found.items())
+                    )
 
-            try:
-                found = find_tag_locations(pages, tags_to_find, api_key, progress_callback=_on_progress)
-            except Exception as e:
-                found = {}
-                st.error(f"Drawing lookup failed: {e}")
-            progress.empty()
+                not_found = [t for t in tags_to_find if t not in found]
+                if not_found:
+                    st.warning("Couldn't find these tags on the drawing set: " + ", ".join(not_found))
 
-            if found:
-                for r in st.session_state.rows:
-                    if r.get("tag") in found and not r.get("location_served"):
-                        r["location_served"] = found[r["tag"]]
-                st.success(f"Filled in {len(found)} location(s): " + ", ".join(f"{t} → {loc}" for t, loc in found.items()))
-
-            not_found = [t for t in tags_to_find if t not in found]
-            if not_found:
-                st.warning("Couldn't find these tags on the drawing set: " + ", ".join(not_found))
-
-st.subheader("3. Review & Edit Schedule")
+st.subheader("2. Review & Edit Schedule")
 
 if st.session_state.rows:
     df = pd.DataFrame(st.session_state.rows)
@@ -179,7 +182,7 @@ if st.session_state.rows:
         key="schedule_editor",
     )
 
-    st.subheader("4. Export")
+    st.subheader("3. Export")
     discipline_short = discipline.split(" (")[0]
     schedule_title = discipline_short + " Equipment Schedule"
     if project_name:
